@@ -19,7 +19,9 @@
 # 10-cohort comparison set SEEDS="1 2 3 4 5 6 7 8 9 10" and raise --time (or run
 # the two phases as separate jobs) — ~160 trainings won't fit one 24h slot.
 
-set -uo pipefail
+# NOTE: no `set -u` — conda's activation scripts reference unset vars
+# (e.g. MKL_INTERFACE_LAYER), which would abort the job under nounset.
+set -o pipefail
 
 SEEDS="1 2 3"          # <-- bump to "1 2 3 4 5 6 7 8 9 10" for the full Table-1 comparison
 
