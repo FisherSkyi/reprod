@@ -101,21 +101,19 @@ def set_config(args):
     config['pretrain_epochs'] = 100
     config['pretrain_early_stopping'] = 25
 
-    # Set number of classes based on dataset
+    # Dataset-specific optimizer / training hyperparameters.
+    # NOTE: n_classes, n_ID_experts and some n_cntx_pts are set in
+    # load_dataset() (helper_fncs.py), which runs right after this and is the
+    # single source of truth for dataset-shape parameters. Set class counts there.
     if config['dataset'] == 'ham10000':
-        config['n_classes'] = 7
         config['lr_wrn'] = 0.0001
     elif config['dataset'] == 'new_ham10000':
-        config['n_classes'] = 7
         config['lr_wrn'] = 0.0001
     elif config['dataset'] == 'bus':
-        config['n_classes'] = 3
         config['lr_wrn'] = 0.001
     elif config['dataset'] == 'organs_axial':
-        config['n_classes'] = 11
         config['lr_wrn'] = 0.001
     elif config['dataset'] == 'blood_mnist':
-        config['n_classes'] = 8
         config['lr_wrn'] = 0.00001
         config['pretrain_lr'] = 1e-4
         config['pretrain_epochs'] = 100
@@ -125,7 +123,6 @@ def set_config(args):
         config['num_epochs'] = 250
         config['early_stopping'] = 50
     elif config['dataset'] == 'oct':
-        config['n_classes'] = 4
         config['lr_wrn'] = 0.0001
         config['pretrain_lr'] = 1e-3
         config['pretrain_epochs'] = 100
@@ -135,13 +132,11 @@ def set_config(args):
         config['num_epochs'] = 250
         config['early_stopping'] = 50
     elif config['dataset'] == 'cifar10':
-        config['n_classes'] = 10
         config['lr_wrn'] = 0.00001
         config['train_batch_size'] = 64
         config['val_batch_size'] = 64
-        config['n_cntx_pts'] = 25  
+        config['n_cntx_pts'] = 25
     elif config['dataset'] == 'imagenet16_grey':
-        config['n_classes'] = 16
         config['lr_wrn'] = 0.001
         config['train_batch_size'] = 128
         config['val_batch_size'] = 128
@@ -242,6 +237,124 @@ def pretrain_clf(model, train_loader, val_loader, config):
     return best_val_statedict.classifier.state_dict(), best_val_statedict.fc.state_dict()
 
 
+def _print_training_banner(config, epochs, n_batches, lr, save_dir):
+    """Print the run-configuration banner shown at the start of training."""
+    if config.get('aux_loss', False):
+        aux_loss_info = f"""
+    Auxiliary Loss : Enabled (λ = {config.get('aux_loss_lambda', 1.0)})"""
+    else:
+        aux_loss_info = """
+    Auxiliary Loss : Disabled"""
+
+    banner = f"""
+    ============================================================
+                             TRAINING START
+    ============================================================
+    Total Epochs   : {epochs}
+    Total Batches  : {n_batches}
+    Batch Size     : {config["train_batch_size"]}
+    Learning Rate  : {lr}
+    Seed           : {config["seed"]}
+    Device         : {device}
+    Model          : {config['model']}
+    Experiment Name: {config['experiment_name']}{aux_loss_info}
+    Save Directory : {save_dir}
+    ============================================================
+    """
+    print(banner)
+
+
+def _save_epoch_metrics(save_dir, config, clf_acc_by_exp, sys_acc_by_exp, defer_acc_by_exp,
+                        train_loss_lst, val_loss_lst, deferral_loss_lst, aux_loss_lst):
+    """Write the running per-epoch metrics to metrics_df.csv in save_dir."""
+    metrics_data = {
+        'val_clf_acc': clf_acc_by_exp,
+        'val_sys_acc': sys_acc_by_exp,
+        'val_deferral_acc': defer_acc_by_exp,
+        'train_loss': train_loss_lst,
+        'val_loss': val_loss_lst
+    }
+
+    # Add loss components for IFD with auxiliary loss
+    if config['model'] == 'ifd' and config.get('aux_loss', False):
+        metrics_data['deferral_loss'] = deferral_loss_lst
+        metrics_data['aux_loss'] = aux_loss_lst
+
+    df = pd.DataFrame(data=metrics_data)
+    df.to_csv(os.path.join(save_dir, 'metrics_df.csv'))
+
+
+def _plot_training_curves(save_dir, config, train_loss_lst, val_loss_lst,
+                          deferral_loss_lst, aux_loss_lst,
+                          clf_acc_by_exp, sys_acc_by_exp, defer_acc_by_exp,
+                          best_epoch, best_val_loss_epoch):
+    """Render training/validation loss and accuracy curves to validation_figs.png."""
+    # Create subplots: 6 for IFD with aux loss, 4 for others
+    if config['model'] == 'ifd' and config.get('aux_loss', False):
+        fig, ax = plt.subplots(7, figsize=(12,24))
+    else:
+        fig, ax = plt.subplots(4, figsize=(10,20))
+
+    # Main training/validation loss
+    ax[0].plot(train_loss_lst, label='Train')
+    ax[0].plot(val_loss_lst, label='Val')
+    ax[0].vlines(best_epoch, ymin=ax[0].get_ylim()[0], ymax=ax[0].get_ylim()[1], colors='red', linestyles='--', label=f'Best Acc Epoch {best_epoch}')
+    ax[0].vlines(best_val_loss_epoch, ymin=ax[0].get_ylim()[0], ymax=ax[0].get_ylim()[1], colors='blue', linestyles='--', label=f'Best Loss Epoch {best_val_loss_epoch}')
+    ax[0].legend()
+    ax[0].set_title('Total Loss')
+
+    # Separate loss components for IFD with auxiliary loss
+    if config['model'] == 'ifd' and config.get('aux_loss', False):
+        # Deferral loss
+        ax[1].plot(deferral_loss_lst, label='Deferral Loss', color='red')
+        ax[1].set_title('Deferral Loss (IFD)')
+        ax[1].legend()
+
+        # Auxiliary loss
+        ax[2].plot(aux_loss_lst, label='Auxiliary Loss', color='blue')
+        ax[2].set_title(f'Auxiliary Loss (λ = {config.get("aux_loss_lambda", 1.0)})')
+        ax[2].legend()
+
+        # Combined loss components
+        ax[3].plot(deferral_loss_lst, label='Deferral', color='red', alpha=0.7)
+        ax[3].plot([x * config.get('aux_loss_lambda', 1.0) for x in aux_loss_lst],
+                   label=f'Auxiliary × {config.get("aux_loss_lambda", 1.0)}', color='blue', alpha=0.7)
+        ax[3].plot(train_loss_lst, label='Total', color='green', linewidth=2)
+        ax[3].set_title('Loss Components')
+        ax[3].legend()
+
+        # Accuracy plots
+        ax[4].plot(clf_acc_by_exp)
+        ax[4].plot(pd.Series(clf_acc_by_exp).rolling(50).mean())
+        ax[4].set_title('Validation AURCAC')
+
+        ax[5].plot(sys_acc_by_exp)
+        ax[5].plot(pd.Series(sys_acc_by_exp).rolling(50).mean())
+        ax[5].set_title('Validation AURSAC')
+
+        ax[6].plot(defer_acc_by_exp)
+        ax[6].plot(pd.Series(defer_acc_by_exp).rolling(50).mean())
+        ax[6].set_title('Validation AURDAC')
+
+    else:
+        # Standard plots for other models
+        ax[1].plot(clf_acc_by_exp)
+        ax[1].plot(pd.Series(clf_acc_by_exp).rolling(50).mean())
+        ax[1].set_title('Validation AURCAC')
+
+        ax[2].plot(sys_acc_by_exp)
+        ax[2].plot(pd.Series(sys_acc_by_exp).rolling(50).mean())
+        ax[2].set_title('Validation AURSAC')
+
+        ax[3].plot(defer_acc_by_exp)
+        ax[3].plot(pd.Series(defer_acc_by_exp).rolling(50).mean())
+        ax[3].set_title('Validation AURDAC')
+
+    plt.tight_layout()
+    fig.savefig(os.path.join(save_dir, 'validation_figs.png'))
+    plt.close(fig)  # Close the figure to free memory
+
+
 def train_model(experts_lst, tr_cntx_sampler, val_cntx_sampler, config, model_statedict=None, num_epochs=5, plot_losses=False, early_stopping=None, return_val_loss=False, pretrained_clf_statedict=None):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     save_dir = f"./experiments/{config['experiment_name']}/{config['model']}/{config['dataset']}/{config['expert_archetypes']}/{config['seed']}/{timestamp}"
@@ -305,31 +418,7 @@ def train_model(experts_lst, tr_cntx_sampler, val_cntx_sampler, config, model_st
     defer_acc_by_exp = []
     sys_acc_by_exp = []
 
-    # Add auxiliary loss info to banner
-    aux_loss_info = ""
-    if config.get('aux_loss', False):
-        aux_loss_info = f"""
-    Auxiliary Loss : Enabled (λ = {config.get('aux_loss_lambda', 1.0)})"""
-    else:
-        aux_loss_info = """
-    Auxiliary Loss : Disabled"""
-    
-    banner = f"""
-    ============================================================
-                             TRAINING START
-    ============================================================
-    Total Epochs   : {epochs}
-    Total Batches  : {len(train_query_loader)}
-    Batch Size     : {config["train_batch_size"]}
-    Learning Rate  : {lr}
-    Seed           : {config["seed"]}
-    Device         : {device}
-    Model          : {config['model']}
-    Experiment Name: {config['experiment_name']}{aux_loss_info}
-    Save Directory : {save_dir}
-    ============================================================
-    """
-    print(banner)
+    _print_training_banner(config, epochs, len(train_query_loader), lr, save_dir)
 
     def print_epoch_banner(epoch, total_epochs):
         sub_banner = f"""------------------------------------------------------------
@@ -474,22 +563,9 @@ def train_model(experts_lst, tr_cntx_sampler, val_cntx_sampler, config, model_st
 
         val_loss_lst.append(val_loss)
         
-        # Save metrics including loss components
-        metrics_data = {
-            'val_clf_acc': clf_acc_by_exp, 
-            'val_sys_acc': sys_acc_by_exp, 
-            'val_deferral_acc': defer_acc_by_exp,
-            'train_loss': train_loss_lst,
-            'val_loss': val_loss_lst
-        }
-        
-        # Add loss components for IFD with auxiliary loss
-        if config['model'] == 'ifd' and config.get('aux_loss', False):
-            metrics_data['deferral_loss'] = deferral_loss_lst
-            metrics_data['aux_loss'] = aux_loss_lst
-        
-        df = pd.DataFrame(data=metrics_data)
-        df.to_csv(os.path.join(save_dir, 'metrics_df.csv'))
+        # Save the running per-epoch metrics to metrics_df.csv
+        _save_epoch_metrics(save_dir, config, clf_acc_by_exp, sys_acc_by_exp, defer_acc_by_exp,
+                            train_loss_lst, val_loss_lst, deferral_loss_lst, aux_loss_lst)
 
         # Evaluate early stopping
         if (early_stopping is not None):
@@ -536,71 +612,11 @@ def train_model(experts_lst, tr_cntx_sampler, val_cntx_sampler, config, model_st
                 print("------"*20)
                 break
 
-        if plot_losses==True:
-            # Create subplots: 6 for IFD with aux loss, 4 for others
-            if config['model'] == 'ifd' and config.get('aux_loss', False):
-                fig, ax = plt.subplots(7, figsize=(12,24))
-            else:
-                fig, ax = plt.subplots(4, figsize=(10,20))
-            
-            # Main training/validation loss
-            ax[0].plot(train_loss_lst, label='Train')
-            ax[0].plot(val_loss_lst, label='Val')
-            ax[0].vlines(best_epoch, ymin=ax[0].get_ylim()[0], ymax=ax[0].get_ylim()[1], colors='red', linestyles='--', label=f'Best Acc Epoch {best_epoch}')
-            ax[0].vlines(best_val_loss_epoch, ymin=ax[0].get_ylim()[0], ymax=ax[0].get_ylim()[1], colors='blue', linestyles='--', label=f'Best Loss Epoch {best_val_loss_epoch}')
-            ax[0].legend() 
-            ax[0].set_title('Total Loss')
-
-            # Separate loss components for IFD with auxiliary loss
-            if config['model'] == 'ifd' and config.get('aux_loss', False):
-                # Deferral loss
-                ax[1].plot(deferral_loss_lst, label='Deferral Loss', color='red')
-                ax[1].set_title('Deferral Loss (IFD)')
-                ax[1].legend()
-                
-                # Auxiliary loss
-                ax[2].plot(aux_loss_lst, label='Auxiliary Loss', color='blue')
-                ax[2].set_title(f'Auxiliary Loss (λ = {config.get("aux_loss_lambda", 1.0)})')
-                ax[2].legend()
-                
-                # Combined loss components
-                ax[3].plot(deferral_loss_lst, label='Deferral', color='red', alpha=0.7)
-                ax[3].plot([x * config.get('aux_loss_lambda', 1.0) for x in aux_loss_lst], 
-                           label=f'Auxiliary × {config.get("aux_loss_lambda", 1.0)}', color='blue', alpha=0.7)
-                ax[3].plot(train_loss_lst, label='Total', color='green', linewidth=2)
-                ax[3].set_title('Loss Components')
-                ax[3].legend()
-                
-                # Accuracy plots
-                ax[4].plot(clf_acc_by_exp)
-                ax[4].plot(pd.Series(clf_acc_by_exp).rolling(50).mean())
-                ax[4].set_title('Validation AURCAC')
-
-                ax[5].plot(sys_acc_by_exp)
-                ax[5].plot(pd.Series(sys_acc_by_exp).rolling(50).mean())
-                ax[5].set_title('Validation AURSAC')
-
-                ax[6].plot(defer_acc_by_exp)
-                ax[6].plot(pd.Series(defer_acc_by_exp).rolling(50).mean())
-                ax[6].set_title('Validation AURDAC')
-                
-            else:
-                # Standard plots for other models
-                ax[1].plot(clf_acc_by_exp)
-                ax[1].plot(pd.Series(clf_acc_by_exp).rolling(50).mean())
-                ax[1].set_title('Validation AURCAC')
-
-                ax[2].plot(sys_acc_by_exp)
-                ax[2].plot(pd.Series(sys_acc_by_exp).rolling(50).mean())
-                ax[2].set_title('Validation AURSAC')
-
-                ax[3].plot(defer_acc_by_exp)
-                ax[3].plot(pd.Series(defer_acc_by_exp).rolling(50).mean())
-                ax[3].set_title('Validation AURDAC')
-
-            plt.tight_layout()   
-            fig.savefig(os.path.join(save_dir, 'validation_figs.png'))
-            plt.close(fig)  # Close the figure to free memory
+        if plot_losses == True:
+            _plot_training_curves(save_dir, config, train_loss_lst, val_loss_lst,
+                                  deferral_loss_lst, aux_loss_lst,
+                                  clf_acc_by_exp, sys_acc_by_exp, defer_acc_by_exp,
+                                  best_epoch, best_val_loss_epoch)
     
     # Print final summary
     print("\n" + "="*60)

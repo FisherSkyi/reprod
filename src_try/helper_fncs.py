@@ -71,6 +71,13 @@ def load_model(config, state_dict=None, pretrained_clf_statedict=None):
     return model
 
 def load_dataset(config):
+    """Load the train/val/test/expert splits and set dataset-shape config.
+
+    This is the single source of truth for the dataset-dependent shape
+    parameters ``n_classes``, ``n_ID_experts`` and (for most datasets)
+    ``n_cntx_pts``. It runs after ``set_config`` in ``main.py`` and overwrites
+    any of those values set there, so per-dataset class counts belong *here*.
+    """
     if config["dataset"] == 'ham10000':
         config["n_classes"] = 7
         config["n_ID_experts"] = 3
@@ -92,7 +99,10 @@ def load_dataset(config):
         train_data, val_data, test_data, expert_data = load_organs_axial(os.path.join(ROOT, 'data/organs_axial/organs_axial_data/organs_axial'))
     elif config["dataset"] == 'blood_mnist':
         config['n_ID_experts'] = 4
-        config["n_classes"] = 8
+        # BloodMNIST has 8 classes (correct default). The BLOOD_N_CLASSES env var
+        # allows an A/B against the historical n_classes=10 bug without editing
+        # source; set it (e.g. =10) before launching to reproduce the buggy setup.
+        config["n_classes"] = int(os.environ.get("BLOOD_N_CLASSES", "8"))
         config["n_cntx_pts"] = 35
         train_data, val_data, test_data, expert_data = load_bloodmnist()
     elif config["dataset"] == 'oct':
@@ -115,14 +125,11 @@ def load_dataset(config):
     return train_data, val_data, test_data, expert_data
 
 def bayesian_inference_per_human(predictions, ground_truth, K, device=device, alpha_prior=None, beta_prior=None, return_posterior_params=False, return_variance=False):
-        # If no prior means are provided, assume an uninformative Beta(1,1)
+        # If no prior means are provided, assume an uninformative Beta(1,1).
+        # Otherwise the passed-in alpha_prior/beta_prior are used as-is.
         if alpha_prior is None:
             alpha_prior = torch.ones(K)  # Uninformative Beta(1,1) prior
             beta_prior = torch.ones(K)
-        else:
-            # Convert prior means into Beta parameters
-            alpha_prior = alpha_prior
-            beta_prior = beta_prior
 
         n_humans = predictions.size(0)
         expert_classes = []
@@ -185,13 +192,15 @@ def random_mode_per_row(tensor, seed=None):
     return rand_vals.argmax(dim=1)
 
 def cross_entropy_mod(outputs, m, labels, n_classes, eps=1e-10):
-    '''
-    The L_{CE} loss implementation for CIFAR with alpha=1
+    '''Softmax-surrogate L2D loss for a single rejector (K classes + 1 defer head).
+
+    Per sample: ``-m * log2(p_defer) - log2(p_true_class)``, where ``p_defer`` is
+    the softmax mass on the rejection index (``n_classes``).
     ----
-    outputs: network outputs
-    m: cost of deferring to expert cost of classifier predicting (I_{m =y})
-    labels: target
-    n_classes: number of classes
+    outputs:   [B, K+1] softmax probabilities (classes, then the defer head)
+    m:         [B] cost/weight of deferring (e.g. indicator the expert is correct)
+    labels:    [B] ground-truth class indices
+    n_classes: number of classes K (also the index of the defer head)
     '''
     batch_size = outputs.size()[0]
     rc = [n_classes] * batch_size # idx to extract rejector function
@@ -199,13 +208,15 @@ def cross_entropy_mod(outputs, m, labels, n_classes, eps=1e-10):
     return torch.sum(outputs) / batch_size
 
 def cross_entropy_l2dmultiexp(outputs, m, labels, n_classes):
-    '''
-    The L_{CE} loss implementation for CIFAR with alpha=1
+    '''Softmax-surrogate L2D loss with one defer head per expert (K classes + E experts).
+
+    Classifier term ``-log2(p_true_class)`` plus, summed over experts,
+    ``-m_e * log2(p_defer_e)`` for each expert's rejection head.
     ----
-    outputs: network outputs
-    m: cost of deferring to expert cost of classifier predicting (I_{m =y})
-    labels: target
-    n_classes: number of classes
+    outputs:   [B, K+E] softmax probabilities (classes, then per-expert defer heads)
+    m:         [B, E] indicator that each expert is correct
+    labels:    [B] ground-truth class indices
+    n_classes: number of classes K (start index of the per-expert defer heads)
     '''
     batch_size = outputs.size()[0]
     clf_loss = -torch.log2(outputs[range(batch_size),labels])
@@ -246,7 +257,6 @@ def validate(model, data_query_loader, experts_lst, cntx_sampler, config):
             query_label_batch = batch['yc'][:,0]
 
             batch_size = query_x_batch.size()[0]
-            n_experts = len(experts_lst)
             labels_lst.extend(query_label_batch.cpu().numpy())
             query_x_batch, query_exp_pred_batch, query_label_batch = query_x_batch.to(device), query_exp_pred_batch.to(device), query_label_batch.to(device)
 
@@ -345,11 +355,11 @@ def validate(model, data_query_loader, experts_lst, cntx_sampler, config):
             clf_acc_arr.append(clf_acc)
             exp_acc_arr.append(exp_acc)
             sys_acc_arr.append(sys_acc)
-        dict = {'clf_acc_arr':clf_acc_arr,
-                'exp_acc_arr':exp_acc_arr,
-                'sys_acc_arr':sys_acc_arr,
-                }
-        return dict, loss.item()
+        metrics_dict = {'clf_acc_arr': clf_acc_arr,
+                        'exp_acc_arr': exp_acc_arr,
+                        'sys_acc_arr': sys_acc_arr,
+                        }
+        return metrics_dict, loss.item()
     else:
         outputs = torch.vstack(all_outputs)
         all_preds_lst = torch.vstack(all_preds_lst)

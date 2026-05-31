@@ -1,6 +1,7 @@
 #!/bin/bash
 
-for dataset in 'blood_mnist'
+for dataset in 'organs_axial'
+# for dataset in 'blood_mnist'
 do
     for seed in 1 2 3 4 5
     do
