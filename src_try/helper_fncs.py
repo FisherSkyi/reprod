@@ -92,7 +92,7 @@ def load_dataset(config):
         train_data, val_data, test_data, expert_data = load_organs_axial(os.path.join(ROOT, 'data/organs_axial/organs_axial_data/organs_axial'))
     elif config["dataset"] == 'blood_mnist':
         config['n_ID_experts'] = 4
-        config["n_classes"] = 10
+        config["n_classes"] = 8
         config["n_cntx_pts"] = 35
         train_data, val_data, test_data, expert_data = load_bloodmnist()
     elif config["dataset"] == 'oct':

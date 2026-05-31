@@ -171,67 +171,6 @@ UNIFIED_EXPERT_ARCHETYPE = {
     }
 }
 
-
-def simulate_prediction(config, image, true_label, expert_params, class_centroids, max_distances, trained_classifier):
-        """
-        Simulate an expert's prediction for a single image.
-        
-        Args:
-            image: Input image tensor
-            true_label: Ground truth label
-            expert_params: Dictionary containing expert configuration
-            class_centroids: Class centroids from simulation setup
-            max_distances: Max distances for normalization
-            trained_classifier: Trained feature extractor model
-        
-        Returns:
-            Dictionary with prediction results
-        """
-        trained_classifier.eval()
-        with torch.no_grad():
-            # Extract features using trained classifier
-            if image.dim() == 3:  # Add batch dimension if needed
-                image = image.unsqueeze(0)
-            
-            image = image.to(device)
-            features = trained_classifier.extract_features(image)
-            
-            # Compute prototypicality score
-            proto_score = get_prototypicality(features[0], true_label, class_centroids, max_distances)
-            
-            # Determine if this is the expert's specialty
-            is_specialty = true_label in [expert_params['specialty_class']]
-            
-            # Get appropriate parameters
-            if is_specialty:
-                alpha = expert_params['alpha_specialty']
-                beta = expert_params['beta_specialty']
-            else:
-                alpha = expert_params['alpha_non_specialty']
-                beta = expert_params['beta_non_specialty']
-            
-            # Compute instance-specific accuracy
-            accuracy = get_instance_accuracy(proto_score, alpha, beta)
-            
-            # Generate stochastic prediction
-            is_correct = np.random.random() < accuracy
-            
-            if is_correct:
-                prediction = true_label
-            else:
-                # Random incorrect prediction
-                possible_labels = [i for i in range(config.n_classes) if i != true_label]
-                prediction = np.random.choice(possible_labels)
-            
-            return {
-                'true_label': true_label,
-                'prediction': prediction,
-                'is_correct': is_correct,
-                'proto_score': proto_score,
-                'accuracy': accuracy,
-                'is_specialty': is_specialty
-            }
-
 def create_unified_expert_profile(specialty_class_idx):
     """
     Create an expert profile using the unified expert archetype.

@@ -872,10 +872,6 @@ def main():
     args = parse_args()
     config = set_config(args)
     print("with attn:", config["with_attn"])
-    print("with attn:", config["with_attn"])
-    print("with attn:", config["with_attn"])
-    print("with attn:", config["with_attn"])
-    print("with attn:", config["with_attn"])
     set_seed(config["seed"])
     
     if config.get('debug', False):
